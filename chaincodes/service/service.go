@@ -6,6 +6,14 @@ import (
 	"github.com/inklabsfoundation/inkchain/core/chaincode/shim"
 	pb "github.com/inklabsfoundation/inkchain/protos/peer"
 	"encoding/json"
+	"time"
+	"math/big"
+)
+
+// Incentive-related const
+const (
+	IncentiveBalanceType 	= "SToken"
+	IncentiveMashupInvoke	= "1"
 )
 
 // Definitions of a service's status
@@ -31,6 +39,7 @@ const (
 	// Service-related invoke
 	RegisterService 	= "registerService"
 	InvalidateService 	= "invalidateService"	// mark whether the service is validated
+	PublishService		= "publishService"		// publish a created service
 	CreateMashup 		= "createMashup"		// utilize services to create a new mashup
 	QueryService		= "queryService"
 	EditService			= "editService"
@@ -56,7 +65,7 @@ type user struct {
 
 	Contribution	int		`json:"contribution"`
 	// "Contribution" evaluates the user's contribution to the service ecosystem.
-
+	// TODO: add handler about "Contribution"
 	// Benefit of "Contribution":
 	// 1. construct a evaluation for every user's contribution on the service ecosystem
 	// 2. inspire users to participate in creating new services and mashups
@@ -157,12 +166,38 @@ func (t *serviceChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response 
 		// args[0]: service name
 		return t.invalidateService(stub, args)
 
+	case PublishService:
+		if len(args) != 1 {
+			return shim.Error("Incorrect number of arguments. Expecting 1.")
+		}
+		// args[0]: service name
+		return t.publishService(stub, args)
+
 	case QueryService:
 		if len(args) != 1 {
 			return shim.Error("Incorrect number of arguments. Expecting 1.")
 		}
 		// args[0]: service name
 		return t.queryService(stub, args)
+
+	case EditService:
+		if len(args) != 3 {
+			return shim.Error("Incorrect number of arguments. Expecting 3.")
+		}
+		// args[0]: service name
+		// args[1]: filed name to change
+		// args[2]: new filed value
+		return t.editService(stub, args)
+
+	case CreateMashup:
+		if len(args) < 4 {
+			return shim.Error("Incorrect number of arguments. Expecting 4 at least.")
+		}
+		// args[0]: mashup name
+		// args[1]: mashup type
+		// args[2]: mashup description
+		// args[3...]: invoked service list
+		return t.createMashup(stub, args)
 
 	// ********************************************************
 	// PART 3: user-related reward invokes
@@ -295,9 +330,13 @@ func (t *serviceChaincode) registerService(stub shim.ChaincodeStubInterface, arg
 		return shim.Error("This service already exists: " + service_name)
 	}
 
+	// get current time
+	tNow := time.Now()
+	tString := tNow.UTC().Format(time.UnixDate)
+
 	// register service
 	newS := &service{service_name, service_type, service_dev,
-		service_des, "", "", S_Created,
+		service_des, tString, "", S_Created,
 		false, make(map[string]int)}
 	serviceJSONasBytes, err := json.Marshal(newS)
 	if err != nil {
@@ -365,6 +404,60 @@ func (t *serviceChaincode) invalidateService(stub shim.ChaincodeStubInterface, a
 	return shim.Success([]byte("Invalidate Service success."))
 }
 
+// =================================================
+// publishService: publish a created service
+// =================================================
+func (t *serviceChaincode) publishService(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var service_name string
+	var err error
+
+	service_name = args[0]
+
+	// STEP 0: check if service exists
+	service_key := ServicePrefix + service_name
+	serviceAsBytes, err := stub.GetState(service_key)
+	if err != nil {
+		return shim.Error("Fail to get service: " + err.Error())
+	} else if serviceAsBytes == nil {
+		return shim.Error("This service does not exists: " + service_name)
+	}
+
+	// STEP 1: check whether it is the service's developer's invocation
+	var senderAdd string
+	senderAdd, err = stub.GetSender()
+	if err != nil {
+		return shim.Error("Fail to get the sender's address.")
+	}
+
+	var serviceJSON service
+	err = json.Unmarshal([]byte(serviceAsBytes), &serviceJSON)
+	if err != nil {
+		return shim.Error("Error unmarshal service bytes.")
+	}
+
+	if senderAdd != serviceJSON.Developer {
+		return shim.Error("Aurthority err! Not invoke by the service's developer.")
+	}
+
+	// STEP 2: publish the service and store it.
+	// new service, make it invalidated
+	new_service := &service{serviceJSON.Name, serviceJSON.Type, serviceJSON.Developer,
+		serviceJSON.Description, serviceJSON.CreatedTime, serviceJSON.UpdatedTime,
+		S_Available, serviceJSON.IsMashup, serviceJSON.Composition}
+	// store the new service
+	serviceJSONasBytes, err := json.Marshal(new_service)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	err = stub.PutState(service_key, serviceJSONasBytes)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	return shim.Success([]byte("Publish Service success."))
+}
+
 // ======================================
 // queryService: Query an existed service
 // ======================================
@@ -385,4 +478,184 @@ func (t *serviceChaincode) queryService(stub shim.ChaincodeStubInterface, args [
 
 	// return service info
 	return shim.Success(serviceAsBytes)
+}
+
+// ======================================
+// editService: Edit an existed service
+// ======================================
+func (t *serviceChaincode) editService(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var service_name string
+	var field_name string
+	var field_value string
+	var err error
+
+	service_name = args[0]
+	field_name = args[1]
+	field_value = args[2]
+
+	// STEP 0: check the service does not exist
+	service_key := ServicePrefix + service_name
+	serviceAsBytes, err := stub.GetState(service_key)
+	if err != nil {
+		return shim.Error("Fail to get service: " + err.Error())
+	} else if serviceAsBytes == nil {
+		return shim.Error("This service does not exist: " + service_name)
+	}
+
+	// STEP 1: check whether it is the service's developer's invocation
+	var senderAdd string
+	senderAdd, err = stub.GetSender()
+	if err != nil {
+		return shim.Error("Fail to get the sender's address.")
+	}
+
+	var serviceJSON service
+	err = json.Unmarshal([]byte(serviceAsBytes), &serviceJSON)
+	if err != nil {
+		return shim.Error("Error unmarshal service bytes.")
+	}
+
+	if senderAdd != serviceJSON.Developer {
+		return shim.Error("Aurthority err! Not invoke by the service's developer.")
+	}
+
+	// STEP 2: update time information
+	tNow := time.Now()
+	tString := tNow.UTC().Format(time.UnixDate)
+
+	new_service := &service{serviceJSON.Name, serviceJSON.Type, serviceJSON.Developer,
+							serviceJSON.Description, serviceJSON.CreatedTime, tString,
+							 serviceJSON.Status, serviceJSON.IsMashup, serviceJSON.Composition}
+
+	// STEP 3: update field value
+	// developer can update service's type/description information
+	switch field_name {
+	case "Type":
+		new_service.Type = field_value
+		goto LABEL_STORE
+	case "Description":
+		new_service.Description = field_value
+		goto LABEL_STORE
+	}
+	return shim.Error("Error field name.")
+
+LABEL_STORE:
+	// STEP 4: store the service
+	serviceJSONasBytes, err := json.Marshal(new_service)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	err = stub.PutState(service_key, serviceJSONasBytes)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	// return service info
+	return shim.Success(serviceAsBytes)
+}
+
+// =======================================================
+// createMashup: Create a new mashup
+// note: a mashup should invoke at least one service API
+// =======================================================
+func (t *serviceChaincode) createMashup(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var mashup_name string
+	var mashup_type string
+	var mashup_des  string
+	var mashup_dev  string
+	var err error
+
+	mashup_name = args[0]
+	mashup_type = args[1]
+	mashup_des = args[2]
+
+	// STEP 0: get mashup developer
+	mashup_dev, err = stub.GetSender()
+	if err != nil {
+		return shim.Error("Fail to get the sender's address.")
+	}
+
+	// STEP 1: check if service does not exist
+	mashup_key := ServicePrefix + mashup_name
+	serviceAsBytes, err := stub.GetState(mashup_key)
+	if err != nil {
+		return shim.Error("Fail to get service: " + err.Error())
+	} else if serviceAsBytes != nil {
+		return shim.Error("This service already exists: " + mashup_name)
+	}
+
+	// STEP 2: create a new mashup
+	// get current time
+	tNow := time.Now()
+	tString := tNow.UTC().Format(time.UnixDate)
+
+	// create composition
+	new_map := make(map[string]int)
+	new_developer_map := make(map[string]int)
+	for i:= 3; i<len(args);i++ {
+		// check the service exist
+		service_key := ServicePrefix + args[i]
+		serviceAsBytes, err := stub.GetState(service_key)
+		if err != nil {
+			return shim.Error("Fail to get service: " + err.Error())
+		} else if serviceAsBytes == nil {
+			return shim.Error("This service doesn't exist: " + args[i])
+		}
+		// add the service into map
+		new_map[args[i]] = 1
+		// temporarily store their addresses
+		var serviceJSON service
+		err = json.Unmarshal([]byte(serviceAsBytes), &serviceJSON)
+		if err != nil {
+			return shim.Error("Error unmarshal service bytes.")
+		}
+		new_developer_map[serviceJSON.Developer] = 1
+	}
+
+	// new mashup
+	newS := &service{mashup_name, mashup_type, mashup_dev,
+		mashup_des, tString, "", S_Created,
+		true, new_map}
+
+	// STEP 3: pay to the invoked services' developers
+	// Important!
+	// Incentive Mechanism Here
+
+	incentive_amount := big.NewInt(0)
+	incentive_amount.SetString(IncentiveMashupInvoke, 10)
+
+	for k,_ := range(new_developer_map) {
+		// get the k's address
+		user_key := UserPrefix + k
+		userAsBytes, err := stub.GetState(user_key)
+		if err != nil {
+			return shim.Error("Fail to get user: " + err.Error())
+		} else if userAsBytes == nil {
+			return shim.Error("This user doesn't exist: " + k)
+		}
+		var userJSON user
+		err = json.Unmarshal([]byte(userAsBytes), &userJSON)
+		if err != nil {
+			return shim.Error("Error unmarshal user bytes.")
+		}
+		// make incentive transfer
+		// from the mashup developer to the invoked service's developer
+		err = stub.Transfer(userJSON.Address, IncentiveBalanceType, incentive_amount)
+		if err != nil {
+			return shim.Error("Error when making transfer。")
+		}
+	}
+
+	// STEP 4: store the new mashup
+	serviceJSONasBytes, err := json.Marshal(newS)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	err = stub.PutState(mashup_key, serviceJSONasBytes)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+
+	return shim.Success([]byte("Mashup register success."))
 }
