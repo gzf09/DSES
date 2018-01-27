@@ -76,24 +76,56 @@ chaincodeQueryB () {
 }
 
 # for init user
-assetInvoke_AddUser(){
-    peer chaincode invoke -C mychannel -n service --tls $CORE_PEER_TLS_ENABLED --cafile $ORDERER_CA -c '{"Args":["registerUser","'$1'","'"$2"'"]}' -i "10" -z 70698e364537a106b5aa5332d660e2234b37eebcb3768a2a97ffb8042dfe2fc4 >&log.txt
+serviceInvoke_AddUser(){
+    peer chaincode invoke -C mychannel -n service --tls $CORE_PEER_TLS_ENABLED --cafile $ORDERER_CA -c '{"Args":["registerUser","'$1'","'"$2"'"]}' -i "10" -z $3 >&log.txt
     res=$?
     cat log.txt
-    verifyResult $res "asset invoke: addUser has Failed."
-    echo_g "===================== asset invoke successfully======================= "
+    verifyResult $res "service invoke: addUser has Failed."
+    echo_g "===================== service invoke successfully ======================= "
     echo
 }
 
-assetQuery_User() {
+serviceQuery_User() {
     echo_b "Attempting to Query user "
     sleep 3
     peer chaincode query -C mychannel -n service -c '{"Args":["queryUser","'$1'"]}' >log.txt
 
     res=$?
     cat log.txt
-    verifyResult $res "query user: Dainel Failed."
+    verifyResult $res "query user: Failed."
 }
+
+# for init service
+serviceInvoke_AddService(){
+    peer chaincode invoke -C mychannel -n service --tls $CORE_PEER_TLS_ENABLED --cafile $ORDERER_CA -c '{"Args":["registerService","'$1'","'$2'","'"$3"'","'$4'"]}' -i "10" -z $5 >&log.txt
+    res=$?
+    cat log.txt
+    verifyResult $res "service invoke: addService has Failed."
+    echo_g "===================== service invoke successfully ======================= "
+    echo
+}
+
+serviceQuery_Service() {
+    echo_b "Attempting to Query user "
+    sleep 3
+    peer chaincode query -C mychannel -n service -c '{"Args":["queryService","'$1'"]}' >log.txt
+
+    res=$?
+    cat log.txt
+    verifyResult $res "query service: Failed."
+}
+
+# test publish service
+# for init service
+serviceInvoke_PublishService(){
+    peer chaincode invoke -C mychannel -n service --tls $CORE_PEER_TLS_ENABLED --cafile $ORDERER_CA -c '{"Args":["invalidateService","'$1'"]}' -i "10" -z $2 >&log.txt
+    res=$?
+    cat log.txt
+    verifyResult $res "service invoke: addService has Failed."
+    echo_g "===================== service invoke successfully ======================= "
+    echo
+}
+
 
 echo_b "=====================6.Issue a token using ascc========================"
 issueToken INK
@@ -107,12 +139,32 @@ chaincodeQueryA
 echo_b "=====================9.Query transfer result of To account====================="
 chaincodeQueryB
 
-echo_b "=====================0. Init for test Asset====================="
+echo_b "=====================0. Init for test Service====================="
 echo_b "=====================0.1 add 2 user======================="
-assetInvoke_AddUser Zhenfeng "An active service developer from Tsinghua University."
+
+serviceInvoke_AddUser user1 "An active service developer from Tsinghua University." 70698e364537a106b5aa5332d660e2234b37eebcb3768a2a97ffb8042dfe2fc4
+serviceInvoke_AddUser user2 "An active service developer from Inklabs Foundation." 344c267e5acb2ac9107465fc85eba24cbb17509e918c3cc3f5098dddf42167e5
 
 echo_b "=====================0.2 query 2 user======================="
-assetQuery_User Zhenfeng
+serviceQuery_User user1
+
+echo_b "=====================0.3 register 2 service======================="
+serviceInvoke_AddService S1 Map "A service about map APIs." user1 70698e364537a106b5aa5332d660e2234b37eebcb3768a2a97ffb8042dfe2fc4
+serviceInvoke_AddService S2 2ap "A service about 2map APIs." user2 344c267e5acb2ac9107465fc85eba24cbb17509e918c3cc3f5098dddf42167e5
+
+echo_b "=====================0.4 query service======================="
+serviceQuery_Service S1
+serviceQuery_Service S2
+
+
+echo_b "=====================0.5 publis a service======================="
+serviceInvoke_PublishService S2 344c267e5acb2ac9107465fc85eba24cbb17509e918c3cc3f5098dddf42167e5
+
+
+echo_b "=====================0.6 query service======================="
+serviceQuery_Service S1
+serviceQuery_Service S2
+
 
 echo
 echo_g "=====================All GOOD, MVE Test completed ===================== "

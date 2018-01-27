@@ -12,8 +12,8 @@ import (
 
 // Incentive-related const
 const (
-	IncentiveBalanceType 	= "SToken"
-	IncentiveMashupInvoke	= "1"
+	IncentiveBalanceType 	= "INK"
+	IncentiveMashupInvoke	= "10"
 )
 
 // Definitions of a service's status
@@ -151,12 +151,13 @@ func (t *serviceChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response 
 	// ********************************************************
 	// PART 2: service-related invokes
 	case RegisterService:
-		if len(args) != 3 {
-			return shim.Error("Incorrect number of arguments. Expecting 3.")
+		if len(args) != 4 {
+			return shim.Error("Incorrect number of arguments. Expecting 4.")
 		}
 		// args[0]: service name
 		// args[1]: service type
 		// args[2]: service description
+		// args[3]: developer's name
 		return t.registerService(stub, args)
 
 	case InvalidateService:
@@ -201,6 +202,14 @@ func (t *serviceChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response 
 
 	// ********************************************************
 	// PART 3: user-related reward invokes
+	case RewardService:
+		if len(args) < 3 {
+			return shim.Error("Incorrect number of arguments. Expecting 3 at least.")
+		}
+		// args[0]: service name
+		// args[1]: reward_type
+		// args[2]: reward_amount
+		return t.rewardService(stub, args)
 	}
 
 	return shim.Error("Invalid invoke function name.")
@@ -309,16 +318,31 @@ func (t *serviceChaincode) registerService(stub shim.ChaincodeStubInterface, arg
 	var service_type string
 	var service_des  string
 	var service_dev  string
+	var user_name string
 	var err error
 
 	service_name = args[0]
 	service_type = args[1]
 	service_des = args[2]
+	user_name = args[3]
 
-	// get service developer
+	// get service developer, check if it corresponds with the input user
 	service_dev, err = stub.GetSender()
 	if err != nil {
 		return shim.Error("Fail to get the sender's address.")
+	}
+	user_key := UserPrefix + user_name
+	userAsBytes, err := stub.GetState(user_key)
+	if err != nil {
+		return shim.Error("Fail to get user: " + err.Error())
+	}
+	var userJSON user
+	err = json.Unmarshal([]byte(userAsBytes), &userJSON)
+	if err != nil {
+		return shim.Error("Error unmarshal user bytes.")
+	}
+	if userJSON.Address != service_dev {
+		return shim.Error("Not the correct user.")
 	}
 
 	// check if service exists
@@ -335,7 +359,7 @@ func (t *serviceChaincode) registerService(stub shim.ChaincodeStubInterface, arg
 	tString := tNow.UTC().Format(time.UnixDate)
 
 	// register service
-	newS := &service{service_name, service_type, service_dev,
+	newS := &service{service_name, service_type, user_name,
 		service_des, tString, "", S_Created,
 		false, make(map[string]int)}
 	serviceJSONasBytes, err := json.Marshal(newS)
@@ -381,7 +405,18 @@ func (t *serviceChaincode) invalidateService(stub shim.ChaincodeStubInterface, a
 		return shim.Error("Error unmarshal service bytes.")
 	}
 
-	if senderAdd != serviceJSON.Developer {
+	// 0125
+	// get developer's address
+	dev_key := UserPrefix + serviceJSON.Developer
+	devAsBytes, err := stub.GetState(dev_key)
+	if err != nil {
+		return shim.Error("Error get the developer.")
+	}
+	var DevJSON user
+	err = json.Unmarshal([]byte(devAsBytes), &DevJSON)
+
+	fmt.Println("DevAddress:  " + DevJSON.Address)
+	if senderAdd != DevJSON.Address {
 		return shim.Error("Aurthority err! Not invoke by the service's developer.")
 	}
 
@@ -435,7 +470,21 @@ func (t *serviceChaincode) publishService(stub shim.ChaincodeStubInterface, args
 		return shim.Error("Error unmarshal service bytes.")
 	}
 
-	if senderAdd != serviceJSON.Developer {
+	fmt.Println("SenderAdd:  " + senderAdd)
+	fmt.Println("Developer:  " + serviceJSON.Developer)
+
+	// 0125
+	// get developer's address
+	dev_key := UserPrefix + serviceJSON.Developer
+	devAsBytes, err := stub.GetState(dev_key)
+	if err != nil {
+		return shim.Error("Error get the developer.")
+	}
+	var DevJSON user
+	err = json.Unmarshal([]byte(devAsBytes), &DevJSON)
+
+	fmt.Println("DevAddress:  " + DevJSON.Address)
+	if senderAdd != DevJSON.Address {
 		return shim.Error("Aurthority err! Not invoke by the service's developer.")
 	}
 
@@ -515,7 +564,18 @@ func (t *serviceChaincode) editService(stub shim.ChaincodeStubInterface, args []
 		return shim.Error("Error unmarshal service bytes.")
 	}
 
-	if senderAdd != serviceJSON.Developer {
+	// 0125
+	// get developer's address
+	dev_key := UserPrefix + serviceJSON.Developer
+	devAsBytes, err := stub.GetState(dev_key)
+	if err != nil {
+		return shim.Error("Error get the developer.")
+	}
+	var DevJSON user
+	err = json.Unmarshal([]byte(devAsBytes), &DevJSON)
+
+	fmt.Println("DevAddress:  " + DevJSON.Address)
+	if senderAdd != DevJSON.Address {
 		return shim.Error("Aurthority err! Not invoke by the service's developer.")
 	}
 
@@ -643,7 +703,7 @@ func (t *serviceChaincode) createMashup(stub shim.ChaincodeStubInterface, args [
 		// from the mashup developer to the invoked service's developer
 		err = stub.Transfer(userJSON.Address, IncentiveBalanceType, incentive_amount)
 		if err != nil {
-			return shim.Error("Error when making transfer。")
+			return shim.Error("Error when making transfer.")
 		}
 	}
 
@@ -659,3 +719,61 @@ func (t *serviceChaincode) createMashup(stub shim.ChaincodeStubInterface, args [
 
 	return shim.Success([]byte("Mashup register success."))
 }
+
+// =======================================================
+// rewardService: reward a service
+// reward a service's developer, transfer fixed amount of
+// specific reward_type token to the developer's account.
+// =======================================================
+func (t *serviceChaincode) rewardService(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+	var service_name string
+	var reward_type string
+	var err error
+
+	service_name = args[0]
+	reward_type = args[1]
+
+	// Amount
+	reward_amount := big.NewInt(0)
+	_, good := reward_amount.SetString(args[2], 10)
+	if !good {
+		return shim.Error("Expecting integer value for amount")
+	}
+
+	// STEP 0: get service's developer
+	service_key := ServicePrefix + service_name
+	serviceAsBytes, err := stub.GetState(service_key)
+	if err != nil {
+		return shim.Error("Fail to get the service's info.")
+	}
+
+	var serviceJSON service
+	err = json.Unmarshal([]byte(serviceAsBytes), &serviceJSON)
+	if err != nil {
+		return shim.Error("Error unmarshal service bytes.")
+	}
+
+	dev := serviceJSON.Developer
+
+	// STEP 1: get the address of the dev
+	user_key := UserPrefix + dev
+	userAsBytes, err := stub.GetState(user_key)
+	if err != nil {
+		return shim.Error("Fail to get the developer's info.")
+	}
+	var userJSON user
+	err = json.Unmarshal([]byte(userAsBytes), &userJSON)
+	if err != nil {
+		return shim.Error("Error unmarshal user bytes.")
+	}
+
+	// STEP 3: reward the developer
+	toAdd := userJSON.Address
+	err = stub.Transfer(toAdd, reward_type, reward_amount)
+	if err != nil {
+		return shim.Error("Fail realize the reawrd.")
+	}
+
+	return shim.Success([]byte("Reward the service success."))
+}
+
