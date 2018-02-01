@@ -2,12 +2,14 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/inklabsfoundation/inkchain/core/chaincode/shim"
 	pb "github.com/inklabsfoundation/inkchain/protos/peer"
 	"encoding/json"
 	"time"
 	"math/big"
+	"bytes"
 )
 
 // Incentive-related const
@@ -199,6 +201,14 @@ func (t *serviceChaincode) Invoke(stub shim.ChaincodeStubInterface) pb.Response 
 		// args[2]: mashup description
 		// args[3...]: invoked service list
 		return t.createMashup(stub, args)
+
+	case QueryServiceByRange:
+		if len(args) !=2 {
+			return shim.Error("Incorrect number of arguments. Expecting 2.")
+		}
+		// args[0]: begin index
+		// args[1]: end index
+		return t.queryServiceByRange(stub, args)
 
 	// ********************************************************
 	// PART 3: user-related reward invokes
@@ -777,3 +787,55 @@ func (t *serviceChaincode) rewardService(stub shim.ChaincodeStubInterface, args 
 	return shim.Success([]byte("Reward the service success."))
 }
 
+// ========================================================================
+// queryServiceByRange: query services' names by range (startKey, endKey)
+//
+// startKey and endKey are case-sensitive
+// use "" for both startKey and endKey if you want to query all the assets
+// ========================================================================
+func (t *serviceChaincode) queryServiceByRange(stub shim.ChaincodeStubInterface, args []string) pb.Response {
+
+	startKey := ""
+	endKey := ""
+
+	resultsIterator, err := stub.GetStateByRange(startKey, endKey)
+	if err != nil {
+		return shim.Error(err.Error())
+	}
+	defer resultsIterator.Close()
+
+	// buffer is a JSON array containing QueryResults
+	var buffer bytes.Buffer
+	buffer.WriteString("[")
+
+	bArrayMemberAlreadyWritten := false
+	bArrayIndex := 1
+	for resultsIterator.HasNext() {
+		queryResponse, err := resultsIterator.Next()
+		if err != nil {
+			return shim.Error(err.Error())
+		}
+			// Add a comma before array members, suppress it for the first array member
+			if bArrayMemberAlreadyWritten == true {
+				buffer.WriteString(",")
+			}
+			// index of the result
+			buffer.WriteString("{\"Number\":")
+			buffer.WriteString("\"")
+			bArrayIndexStr := strconv.Itoa(bArrayIndex)
+			buffer.WriteString(string(bArrayIndexStr))
+			bArrayIndex += 1
+			buffer.WriteString("\"")
+			// information about current asset
+			buffer.WriteString(", \"Record\":")
+			buffer.WriteString(string(queryResponse.Value))
+			buffer.WriteString("}")
+			bArrayMemberAlreadyWritten = true
+
+
+	}
+	buffer.WriteString("]")
+
+	return shim.Success(buffer.Bytes())
+
+}
